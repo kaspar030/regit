@@ -188,7 +188,7 @@ class Branch(object):
 #                if not Branch.map.get(tmp):
                     tmp = Branch(tmp)
                     print("regit: checking out base branch \"%s\" into "
-                            "temporary branch \"%s\"..." % (s.base, tmp))
+                            "intermediate branch \"%s\"..." % (s.base, tmp))
                     Branch.switch(tmp, s.base)
 #                else:
 #                    tmp = Branch.map.get(tmp)
@@ -220,7 +220,7 @@ class Branch(object):
                     Branch.switch(tmp)
 
         if to_merge:
-            print("regit: merging dependenies %s into %s..." % (", ".join(str_list(to_merge)), s))
+            print("regit: merging dependenies %s into %s..." % (", ".join(str_list(to_merge)), tmp))
             for dep in to_merge:
                 if not dep.based_on(s.base):
                     print("regit: warning: %s is not based on %s!" % (dep, s.base))
@@ -250,24 +250,36 @@ class Branch(object):
                         _err("regit: merging failed. manually fix conflicts, then run \"regit update\" to continue.")
 
         if deps or (tmp==s.base) or _continue:
-            print("regit: rebasing \"%s\" onto \"%s\"..." % (s, tmp))
+            rebase_tmp = Branch.maybe_new("regit/tmp/%s" % s)
+
+            print("regit: rebasing \"%s\" onto \"%s\"..." % (s, rebase_tmp))
             Branch.switch(s)
+            Branch.switch(rebase_tmp, s)
             try:
                 new_rebase_tip = tmp.head()
                 git_command(['rebase', '--onto', str(tmp), s.rebase_tip])
+                Branch.switch(s, rebase_tmp)
+                rebase_tmp.delete()
                 s.rebase_tip = new_rebase_tip
                 s.update_branch_file()
             except subprocess.CalledProcessError as e:
-                state = {
-                        'action' : 'update',
-                        'branch' : str(s),
-                        'base' : str(s.base),
-                        'deps' : str_list(deps),
-                        }
-                statefile = open(state_file(), "w")
-                json.dump(state, statefile)
-                _err("regit: rebasing failed. manually complete rebase, then run \"regit update\" to continue,"
-                              "or \"regit abort\" to cancel.")
+                if is_automerge_complete():
+                    print("regit: rerere auto-resolving of conflicts succeeded.")
+                    git_command(['rebase', '--continue'])
+                    Branch.switch(s, rebase_tmp)
+                else:
+                    state = {
+                            'action' : 'update',
+                            'branch' : str(s),
+                            'base' : str(s.base),
+                            'deps' : str_list(deps),
+                            'new_rebase_tip' : new_rebase_tip,
+                            }
+                    statefile = open(state_file(), "w")
+                    json.dump(state, statefile)
+                    _err("regit: rebasing failed. manually complete rebase, then run \"regit update\" to continue,"
+                                  "or \"regit abort\" to cancel.")
+
 
         elif Branch.current != s:
             Branch.switch(s)
@@ -483,7 +495,7 @@ def str_list(list):
 def git_command_output(cmd):
     git = [ 'git', ]
     git.extend(cmd)
-    return subprocess.check_output(git, universal_newlines=True)
+    return subprocess.check_output(git, universal_newlines=True, stderr=subprocess.DEVNULL)
 
 def git_command(cmd, quiet=False):
     git = [ 'git', ]
@@ -539,6 +551,13 @@ def git_workdir_clean():
 
 def is_automerge_complete():
     return cmd_check("test -z \"$(git status --porcelain -s | grep -vE '(^[ADMR]  )')\"")
+
+def rev_parse(ref):
+    try:
+        ref = git_command_output(["rev-parse", ref])
+        return ref.rstrip()
+    except subprocess.CalledProcessError:
+        return None
 
 def print_dependency_status(branch, deps):
     if deps:
@@ -739,6 +758,32 @@ def delete_branch(args):
 
     Branch.switch(b)
 
+def set_rebase_tip(args):
+    if not (args.commit or args.base):
+        _err("regit: set-rebase-tip: either a commit reference or --base/-b are required!")
+
+    if (args.commit and args.base):
+        _err("regit: set-rebase-tip: only commit reference *or* --base/-b can be specified!")
+
+    Branch.get()
+    b = Branch.current
+    b.get_data()
+
+    rev = None
+
+    if args.commit:
+        rev = rev_parse(args.commit)
+        if not rev:
+            _err("regit: invalid commit reference \"%s\"" % args.commit)
+
+    else:
+        rev = b.base.head()
+
+    b.rebase_tip = rev
+    b.update_branch_file()
+
+    print("regit: set rebase tip of branch %s to %s." % (b.name, b.rebase_tip[:8]))
+
 if __name__=="__main__":
     try:
         topdir = git_command_output(['rev-parse', '--show-toplevel']).rstrip()
@@ -801,6 +846,14 @@ if __name__=="__main__":
     parser_delete_branch = subparsers.add_parser("delete-branch", help="delete a branch, updating dependencies")
     parser_delete_branch.add_argument("branch", nargs='+', help="name of new branch to delete.", default=None)
     parser_delete_branch.set_defaults(func=delete_branch)
+
+    parser_set_rebase_tip = subparsers.add_parser("set-rebase-tip", help="update the branches rebase tip")
+    parser_set_rebase_tip.add_argument("commit", nargs='?', help="git commit reference to use as new rebase tip", default=None)
+    parser_set_rebase_tip.add_argument("--base", "-b",
+            help="use head of base branch",
+            action='store_true'
+            )
+    parser_set_rebase_tip.set_defaults(func=set_rebase_tip)
 
 #    parser_add = subparsers.add_parser("filter", help="regit commit filter")
 #    parser_add.add_argument("filter", choices = [')
