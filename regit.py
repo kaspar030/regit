@@ -15,17 +15,25 @@ re_branch = re.compile(r"  (?P<name>.*)")
 re_current = re.compile(r"\* (?P<name>.*)")
 re_commit_oneline = re.compile(r"(?P<hash>[a-f0-9]{40,40}) (?P<descr>.*)")
 
-
 class Branch(object):
     map = {}
     list = []
     current = None
 
+    def __init__(s, name):
+        s.name = name
+        s.base = None
+        s.deps = None
+        s.rebase_tip = None
+        s.updated = False
+        s.have_data = False
+        Branch.map[name] = s
+
     def switch(branch, base=None):
         if branch==Branch.current:
             return
 
-#        print("regit: switching to branch %s." % branch)
+#        print("regit: switching to branch %s. (base=%s)" % (branch, base))
 
         if base:
             git_command(['checkout', '-B', branch.name, base.name], True)
@@ -43,15 +51,6 @@ class Branch(object):
             return existing
 
         return Branch(name)
-
-    def __init__(s, name):
-        s.name = name
-        s.base = None
-        s.deps = None
-        s.rebase_tip = None
-        s.updated = False
-        s.have_data = False
-        Branch.map[name] = s
 
     def __str__(s):
         return s.name
@@ -144,7 +143,7 @@ class Branch(object):
             b = Branch.map.get(dep)
             if not b:
                 print("regit: error: branch \"%s\" depends on "
-                        "unknown branch \"%s\"." % (s.name, branch))
+                        "unknown branch \"%s\"." % (s.name, dep))
             else:
                 s.deps.append(b)
         s.have_data=True
@@ -237,6 +236,7 @@ class Branch(object):
                     else:
                         state = {
                                 'action' : 'update',
+                                'phase' : 'merge-deps',
                                 'branch' : str(s),
                                 'base' : str(s.base),
                                 'deps' : str_list(deps),
@@ -263,23 +263,17 @@ class Branch(object):
                 s.rebase_tip = new_rebase_tip
                 s.update_branch_file()
             except subprocess.CalledProcessError as e:
-                if is_automerge_complete():
-                    print("regit: rerere auto-resolving of conflicts succeeded.")
-                    git_command(['rebase', '--continue'])
-                    Branch.switch(s, rebase_tmp)
-                else:
-                    state = {
-                            'action' : 'update',
-                            'branch' : str(s),
-                            'base' : str(s.base),
-                            'deps' : str_list(deps),
-                            'new_rebase_tip' : new_rebase_tip,
-                            }
-                    statefile = open(state_file(), "w")
-                    json.dump(state, statefile)
-                    _err("regit: rebasing failed. manually complete rebase, then run \"regit update\" to continue,"
-                                  "or \"regit abort\" to cancel.")
-
+                while True:
+                    if is_automerge_complete():
+                        print("regit: rerere auto-resolving of conflicts succeeded.")
+                        try:
+                            git_command(['rebase', '--continue'])
+                            Branch.switch(s, rebase_tmp)
+                            break
+                        except subprocess.CalledProcessError:
+                            pass
+                    else:
+                        s.save_rebase_state(deps, new_rebase_tip)
 
         elif Branch.current != s:
             Branch.switch(s)
@@ -287,6 +281,39 @@ class Branch(object):
         s.updated = True
         #if tmp != base:
         #    git_command(['branch', '-D', tmp])
+
+    def finish_rebase(s, state):
+        rebase_tmp = Branch.maybe_new("regit/tmp/%s" % s)
+        Branch.switch(rebase_tmp)
+        Branch.switch(s, rebase_tmp)
+        rebase_tmp.delete()
+        s.rebase_tip = state.get('new_rebase_tip')
+        s.update_branch_file()
+
+    def abort_rebase(s, state):
+        print("regit: aborting.")
+        branch = Branch.maybe_new(state.get('branch'))
+
+        if get_rebase_head_name() == "refs/heads/regit/tmp/%s" % branch:
+            git_command(["rebase", "--abort"])
+
+        Branch.switch(branch)
+
+    def save_rebase_state(s, deps, new_rebase_tip):
+        state = {
+                'action' : 'update',
+                'phase' : 'rebase',
+                'branch' : str(s),
+                'base' : str(s.base),
+                'deps' : str_list(deps),
+                'new_rebase_tip' : new_rebase_tip,
+                }
+        statefile = open(state_file(), "w")
+        json.dump(state, statefile)
+        _err("regit: rebasing failed. manually complete rebase, then\n"
+             "regit: run \"git dep --continue\" if the rebase succeeded,\n"
+             "regit: or \"git dep --abort\" to cancel.")
+
 
     def needs_update(s, quiet=True):
         s.get_data()
@@ -376,7 +403,7 @@ class Branch(object):
         s.get_data()
         branch = Branch.maybe_new(name)
         Branch.switch(branch, s.base)
-        print(branch, s.base, merge_base)
+
         if s.deps:
             cmd_check("( cd \"%s\" ; git diff %s..%s | git apply --index )" % (
                 topdir, s.base.name, merge_base))
@@ -486,6 +513,13 @@ class Branch(object):
 #        old_head = s.head()
 #        Branch.switch(s)
 
+def get_rebase_head_name():
+    f = os.path.join(topdir, ".git/rebase-apply/head-name")
+    if os.path.isfile(f):
+        return open(f, "r").readline().rstrip()
+    else:
+        return None
+
 def str_list(list):
     res = []
     for x in list or []:
@@ -513,7 +547,6 @@ def _err(string):
     print(string,file=sys.stderr)
     sys.exit(1)
 
-
 def state_file():
     return os.path.join(topdir, ".git/regit/state")
 
@@ -521,19 +554,12 @@ def load_state():
     try:
         statefile = open(state_file(), "r")
     except:
-        return
+        return None
 
-    return json.load(statefile)
-
-def check_state():
-    state = load_state()
-    if state:
-        action = state.get('action')
-        if action == "update":
-            _err("regit: update in progress. fix conflicts and run \"git dep continue\"")
-        else:
-            _err("regit: statefile corrupt.")
-
+    try:
+        return json.load(statefile)
+    except ValueError as e:
+        return None
 
 def cmd_check(cmd):
     try:
@@ -653,29 +679,19 @@ def name_to_branch(list):
             res.append(_tmp)
     return res
 
+# Command line handler
+
 def update(args):
     global current
     global branches
 
-    state = load_state()
-    if state:
-        os.unlink(state_file())
-        action = state.get('action')
-        if action == "update":
-            print("regit: continuing update.")
-            Branch.get(True)
-            branch = name_to_branch(state.get('branch'))[0]
-            branch.update(state)
-        else:
-            _err("regit: error: update: tree is in a running \"%s\" operation." % action)
+    if not git_workdir_clean():
+        _err("regit: workdir unclean. Please, commit your changes or stash them.")
 
-    else:
-        if not git_workdir_clean():
-            _err("regit: workdir unclean. Please, commit your changes or stash them.")
-        Branch.get()
-        to_update = Branch.current
-        if to_update.check_unmanaged_deps(Branch.current.base):
-            to_update.update()
+    Branch.get()
+    to_update = Branch.current
+    if to_update.check_unmanaged_deps(Branch.current.base):
+        to_update.update()
 
 def export(args):
     Branch.get()
@@ -712,6 +728,24 @@ def add(args):
 
 def ddel(args):
     Branch.get()
+    f = open(Branch.current.branch_file(), 'r')
+    bdict = json.load(f)
+    _deps = bdict.get('deps') or []
+    deps = []
+    for d in _deps:
+        if not d in args.dep:
+            deps.append(d)
+    bdict['deps'] = deps
+
+    Branch.current.update_branch_file(bdict)
+
+def dset(args):
+    Branch.get()
+    f = open(Branch.current.branch_file(), 'r')
+    bdict = json.load(f)
+    bdict['deps'] = args.dep
+
+    Branch.current.update_branch_file(bdict)
 
 def show(args):
     Branch.get()
@@ -758,6 +792,38 @@ def delete_branch(args):
 
     Branch.switch(b)
 
+def handle_state(args):
+    state = load_state()
+    if state:
+        os.unlink(state_file())
+        action = state.get('action')
+        if action == "update":
+            phase = state.get('phase')
+            Branch.get(True)
+            branch = name_to_branch(state.get('branch'))[0]
+
+            if args.cont:
+                branch.get_data()
+
+                if phase == "merge":
+                    print("regit: continuing update.")
+                    branch.update(state)
+
+                elif phase == "rebase":
+                    print("regit: continuing rebase of branch %s." % branch)
+                    branch.finish_rebase(state)
+            else:
+                if phase == "merge":
+                    print("regit: aborting merge.")
+
+                elif phase == "rebase":
+                    branch.abort_rebase(state)
+        else:
+            _err("regit: error: update: tree is in a running \"%s\" operation." % action)
+    else:
+        _err("regit: error while parsing statefile (%s)" % (state_file()))
+
+
 def set_rebase_tip(args):
     if not (args.commit or args.base):
         _err("regit: set-rebase-tip: either a commit reference or --base/-b are required!")
@@ -784,13 +850,22 @@ def set_rebase_tip(args):
 
     print("regit: set rebase tip of branch %s to %s." % (b.name, b.rebase_tip[:8]))
 
-if __name__=="__main__":
+def main():
     try:
+        global topdir
         topdir = git_command_output(['rev-parse', '--show-toplevel']).rstrip()
     except subprocess.CalledProcessError:
         _err("regit: git error (cannot find repository root). Exiting.")
 
-    parser = argparse.ArgumentParser(prog="regit")
+    parser = argparse.ArgumentParser(prog="git dep")
+
+    group = parser.add_argument_group('handling running operations', 'These options are only valid if a current operation is in progress, e.g., a manual conflict resolve.')
+    group.add_argument("--continue", "-c", action='store_true',
+            help="continue with currently running operation", dest="cont")
+
+    group.add_argument("--abort", "-a", action='store_true',
+            help="abort currently running operation")
+
     parser.set_defaults(func=None)
     subparsers = parser.add_subparsers(dest='cmd')
     parser_update = subparsers.add_parser("update", help="update branch(es)")
@@ -812,6 +887,10 @@ if __name__=="__main__":
     parser_del = subparsers.add_parser("del", help="del branch dependencies")
     parser_del.add_argument("dep", nargs='+')
     parser_del.set_defaults(func=ddel)
+
+    parser_set = subparsers.add_parser("set", help="set branch dependencies")
+    parser_set.add_argument("dep", nargs='+')
+    parser_set.set_defaults(func=dset)
 
     parser_show = subparsers.add_parser("show", help="show branch information")
     parser_show.set_defaults(func=show)
@@ -861,7 +940,17 @@ if __name__=="__main__":
 
     args = parser.parse_args()
 
+    if os.path.isfile(state_file()):
+        if not (args.cont or args.abort):
+            _err("regit: operation in progress but no state command given.")
+        else:
+            handle_state(args)
+            return
+
     if not args.func:
         parser.print_help()
     else:
         args.func(args)
+
+if __name__=="__main__":
+    main()
