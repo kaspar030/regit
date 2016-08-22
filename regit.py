@@ -219,7 +219,7 @@ class Branch(object):
                     Branch.switch(tmp)
 
         if to_merge:
-            print("regit: merging dependenies %s into %s..." % (", ".join(str_list(to_merge)), tmp))
+            print("regit: merging dependencies %s into %s..." % (", ".join(str_list(to_merge)), tmp))
             for dep in to_merge:
                 if not dep.based_on(s.base):
                     print("regit: warning: %s is not based on %s!" % (dep, s.base))
@@ -787,7 +787,11 @@ def delete_branch(args):
                 continue
 
             other.delete_deps(branch)
-        os.unlink(branch.branch_file())
+        try:
+            os.unlink(branch.branch_file())
+        except FileNotFoundError:
+            pass
+
         branch.delete()
 
     Branch.switch(b)
