@@ -173,8 +173,9 @@ class Branch(object):
 
         if not _continue:
             if s.base:
-                print("regit: updating base branch \"%s\"..." % s.base)
-                s.base.update()
+                if s != s.base:
+                    print("regit: updating base branch \"%s\"..." % s.base)
+                    s.base.update()
             for dep in deps:
                 print("regit: updating dependency \"%s\"..." % dep)
                 dep.update()
@@ -485,27 +486,27 @@ class Branch(object):
             s.update_branch_file()
             s.have_data = False
 
-    def check_unmanaged_deps(s, base=None):
-        s.get_data()
-        if not (s.deps or s.base or base):
-            print("regit: branch %s doesn't have dependency information." % s)
+    def check_unmanaged_deps(self, base=None):
+        self.get_data()
+        if not (self.deps or self.base or base):
+            print("regit: branch %s doesn't have dependency information." % self)
             return False
 
         res = True
 
         if not base:
-            base = s.base
+            base = self.base
         else:
-            if not s.base:
-                res = s.based_on(base)
-                if not s.based_on(base):
-                    print("regit: branch %s needs rebase to %s!" % (s, base))
+            if not self.base:
+                res = self.based_on(base)
+                if not self.based_on(base):
+                    print("regit: branch %s needs rebase to %s!" % (self, base))
                     return False
                 else:
-                    print("regit: branch %s is based on %s." % (s, base))
+                    print("regit: branch %s is based on %s." % (self, base))
                     return True
 
-        for dep in s.deps or []:
+        for dep in self.deps or []:
              res = res and dep.check_unmanaged_deps(base)
 
         return res
@@ -701,6 +702,9 @@ def export(args):
 
 def init(args):
     Branch.get()
+    if Branch.current is None:
+        _err("regit: cannot determine current branch")
+
     if os.path.isfile(Branch.current.branch_file()):
         _err("regit: error: branch dependency file (%s) already exists." % Branch.current.branch_file())
 
@@ -862,6 +866,8 @@ def main():
         topdir = git_command_output(['rev-parse', '--show-toplevel']).rstrip()
     except subprocess.CalledProcessError:
         _err("regit: git error (cannot find repository root). Exiting.")
+
+    os.makedirs(os.path.join(topdir, ".git", "regit", "branches"), exist_ok=True)
 
     parser = argparse.ArgumentParser(prog="git dep")
 
