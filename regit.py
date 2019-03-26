@@ -451,7 +451,9 @@ class Branch(object):
         json.dump(bdict, open(s.branch_file(), "w"))
 
     def branch_file(s):
-        return os.path.join(topdir, ".git/regit/branches/%s" % s)
+        branch_name = s.name.replace("/", "__")
+
+        return os.path.join(topdir, ".git/regit/branches/%s" % branch_name)
 
     def delete(s):
         if Branch.current==s:
@@ -874,7 +876,11 @@ def main():
     subparsers = parser.add_subparsers(dest='cmd')
     parser_update = subparsers.add_parser("update", help="update branch(es)")
     parser_update.add_argument("--all", "-a",
-            help="update all branches (default: only current + dependencies)",
+            help="update all branches (default: only current)",
+            action='store_true'
+            )
+    parser_update.add_argument("--recursive", "-r",
+            help="recurse to dependency branches (default: only current)",
             action='store_true'
             )
     parser_update.set_defaults(func=update)
