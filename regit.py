@@ -148,7 +148,7 @@ class Branch(object):
                 s.deps.append(b)
         s.have_data=True
 
-    def update(s, _continue=False):
+    def update(s, _continue=False, recursive=False):
         if s.updated:
             print("regit: skipping already updated branch")
             return
@@ -171,14 +171,14 @@ class Branch(object):
         else:
             tmp = s.base
 
-        if not _continue:
+        if recursive and not _continue:
             if s.base:
                 if s != s.base:
                     print("regit: updating base branch \"%s\"..." % s.base)
-                    s.base.update()
+                    s.base.update(recursive=recursive)
             for dep in deps:
                 print("regit: updating dependency \"%s\"..." % dep)
-                dep.update()
+                dep.update(recursive=recursive)
 
         print("regit: updating branch \"%s\"..." % s)
 
@@ -694,7 +694,7 @@ def update(args):
     Branch.get()
     to_update = Branch.current
     if to_update.check_unmanaged_deps(Branch.current.base):
-        to_update.update()
+        to_update.update(False, args.recursive)
 
 def export(args):
     Branch.get()
