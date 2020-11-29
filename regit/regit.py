@@ -27,13 +27,12 @@ class Branch(object):
         self.rebase_tip = None
         self.updated = False
         self.have_data = False
+        self.pr = None
         Branch.map[name] = self
 
     def switch(branch, base=None):
         if branch == Branch.current:
             return
-
-        #        print("regit: switching to branch %s. (base=%s)" % (branch, base))
 
         if base:
             git_command(["checkout", "-B", branch.name, base.name], True)
@@ -54,6 +53,12 @@ class Branch(object):
 
     def __str__(self):
         return self.name
+
+    def name_and_pr(self):
+        if self.pr:
+            return "%s (%s)" % (self.name, self.pr)
+        else:
+            return self.name
 
     def head(self):
         return git_command_output(["show-ref", "-s", "refs/heads/%s" % self]).rstrip()
@@ -127,6 +132,7 @@ class Branch(object):
             _err('regit: branch "%s" has unset rebase tip. exiting.' % (self.name))
         self.rebase_tip = rebase_tip
 
+        self.pr = bdict.get("pr")
         _deps = bdict.get("deps")
         deps = []
         if _deps:
@@ -174,9 +180,9 @@ class Branch(object):
         tmp = None
         if deps:
             if _continue:
-                tmp = Branch.maybe_new("regit/base/%s" % self)
+                tmp = Branch.maybe_new("regit/base/%s" % self.name)
             else:
-                tmp = "regit/base/%s" % self
+                tmp = "regit/base/%s" % self.name
         else:
             tmp = self.base
 
@@ -243,13 +249,13 @@ class Branch(object):
                     print("regit: warning: %s is not based on %s!" % (dep, self.base))
 
                 try:
-                    print("regit: merging branch %s..." % dep)
+                    print("regit: merging branch %s..." % dep.name_and_pr())
                     git_command(
                         [
                             "merge",
                             "--no-ff",
                             "-m",
-                            "DEPENDENCY MERGE: %s" % (dep),
+                            "DEPENDENCY MERGE: %s" % (dep.name_and_pr()),
                             dep.name,
                         ]
                     )
@@ -276,11 +282,13 @@ class Branch(object):
                         json.dump(state, statefile)
 
                         _err(
-                            'regit: merging failed. manually fix conflicts, then run "regit update" to continue.'
+                            'regit: merging failed (probably due to conflixts).' \
+                            'regit: manually fix conflicts, finish the merge (git merge --continue),' \
+                            'regit: then run "git dep --continue".'
                         )
 
         if deps or (tmp == self.base) or _continue:
-            rebase_tmp = Branch.maybe_new("regit/tmp/%s" % self)
+            rebase_tmp = Branch.maybe_new("regit/tmp/%s" % self.name)
 
             print('regit: rebasing "%s" onto "%s"...' % (self, rebase_tmp))
             Branch.switch(self)
@@ -416,9 +424,10 @@ class Branch(object):
         if self.base:
             outset.update(self.base.collect_dot_deps(outset))
             if not self.deps_depend_on(self.base):
-                outset.add('"%s" -> "%s"' % (self, self.base))
+                outset.add('"%s" -> "%s"' % (self.name_and_pr(), self.base))
         for dep in self.deps or []:
-            outset.add('"%s" -> "%s"' % (self, dep))
+            dep.get_data()
+            outset.add('"%s" -> "%s"' % (self.name_and_pr(), dep.name_and_pr()))
             outset.update(dep.collect_dot_deps(outset))
 
         return outset
@@ -487,6 +496,8 @@ class Branch(object):
                 "deps": str_list(self.deps or []),
                 "rebase_tip": self.rebase_tip,
             }
+            if self.pr is not None:
+                bdict["pr"] = self.pr
 
         json.dump(bdict, open(self.branch_file(), "w"))
 
@@ -614,7 +625,7 @@ def load_state():
 
     try:
         return json.load(statefile)
-    except ValueError as e:
+    except ValueError:
         return None
 
 
@@ -639,7 +650,7 @@ def git_workdir_clean():
 
 def is_automerge_complete():
     return cmd_check(
-        "test -z \"$(git status --porcelain -s | grep -vE '(^[ADMR]  )')\""
+        "test -z \"$(git status --porcelain -s | grep -vE '(^[ADMR]  )' | grep -v '^??')\""
     )
 
 
@@ -662,9 +673,9 @@ def print_dependency_status(branch, deps):
             if dep.needs_update():
                 _tmp = " (needs update itself)"
             if dep.base and not dep.base.missing_from(dep):
-                print("(%s)" % dep, _tmp)
+                print("(%s)" % dep.name_and_pr(), _tmp)
             else:
-                print("%s" % dep, _tmp)
+                print("%s" % dep.name_and_pr(), _tmp)
 
 
 def status(args):
@@ -693,7 +704,7 @@ def status(args):
         Branch.switch(branch)
         if not args.dot:
             if not branch.needs_update():
-                print("regit: branch", branch, "is up to date.")
+                print("regit: branch", branch.name_and_pr(), "is up to date.")
                 if branch.base and not branch.base.missing_from(branch):
                     print("regit: branch %s is part of %s!" % (branch, branch.base))
             else:
@@ -723,7 +734,10 @@ def status(args):
             outfile.close()
             pdf = outfile_name + ".pdf"
             cmd_check("cat %s | dot -Tpdf > %s" % (outfile_name, pdf))
-            cmd_check("xdg-open %s" % pdf)
+            try:
+                cmd_check("xdg-open %s" % pdf)
+            except subprocess.CalledProcessError:
+                pass
             os.unlink(outfile_name)
             os.unlink(pdf)
 
@@ -839,10 +853,15 @@ def show(args):
         return
 
     b.get_data()
+    for dep in b.deps or []:
+        dep.get_data()
 
-    print("Branch......:", b)
+    if Branch.current != b:
+        Branch.switch(b)
+
+    print("Branch......:", b.name_and_pr())
     print("Base........:", b.base)
-    print("Dependencies:", ", ".join(str_list(b.deps or [])))
+    print("Dependencies:", ", ".join([x.name_and_pr() for x in b.deps or []]))
     print("Rebase tip..:", b.rebase_tip)
 
 
@@ -944,7 +963,33 @@ def set_rebase_tip(args):
     print("regit: set rebase tip of branch %s to %s." % (b.name, b.rebase_tip[:8]))
 
 
+def set_pr(args):
+    if not (args.pr):
+        _err(
+            "regit: please specify PR number!"
+        )
+
+    pr = args.pr[0]
+    if pr.startswith("#"):
+        pr = pr[1:]
+
+    try:
+        pr = int(pr)
+    except TypeError:
+        _err("regit: please specify PR number as \"#12345\" or just \"12345\"!")
+
+    Branch.get()
+    b = Branch.current
+    b.get_data()
+    b.pr = "#%s" % pr
+    b.update_branch_file()
+
+    print("regit: set PR# of branch %s to %s." % (b, b.pr))
+
+
 def main():
+    os.environ["REGIT"] = "1"
+
     try:
         global topdir
         topdir = git_command_output(["rev-parse", "--show-toplevel"]).rstrip()
@@ -1074,6 +1119,17 @@ def main():
         "--base", "-b", help="use head of base branch", action="store_true"
     )
     parser_set_rebase_tip.set_defaults(func=set_rebase_tip)
+
+    #
+    parser_set_pr = subparsers.add_parser(
+        "set-pr", help="update the branches rebase tip"
+    )
+    parser_set_pr.add_argument(
+        "pr",
+        nargs=1,
+        help="pull request: [#]<12345>",
+    )
+    parser_set_pr.set_defaults(func=set_pr)
 
     #    parser_add = subparsers.add_parser("filter", help="regit commit filter")
     #    parser_add.add_argument("filter", choices = [')
